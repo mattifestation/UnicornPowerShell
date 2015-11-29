@@ -3,6 +3,7 @@
 A pure PowerShell binding of the Unicorn Engine. The Unicorn Engine is developed by:
 
 Nguyen Anh Quynh: aquynh -at- gmail.com
+
 Dang Hoang Vu: dang.hvu -at- gmail.com
 
 ### License
