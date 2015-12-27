@@ -18,13 +18,6 @@ The Unicorn Engine PowerShell binding is a PowerShell module. Load it like any o
 
 The Unicorn Engine PowerShell binding is designed to run on PowerShell version 3 and above.
 
-### Help!!!
+### Known issues
 
-Currently, I am struggling with getting PowerShell scriptblock execution working with the Register-UCHook function. Due to the thread that executes the hooks not having its own runspace, PowerShell scriptblocks will not execute in the context of the thread. The ability to execute scriptblocks in response to hook events is considered a core feature of the PowerShell Unicorn binding so if someone can figure out how to get this working, I would be eternally grateful!!! Thus far, I have tried the techniques explained in the following articles:
-
-http://www.nivot.org/post/2009/10/09/PowerShell20AsynchronousCallbacksFromNET
-http://www.exploit-monday.com/2013/06/PowerShellCallbackFunctions.html
-
-### Todo
-
-Regression tests similar to those in the python binding need to be written. Also, if scriptblock execution ever works for instrumentation callbacks, then all hook types will need to be supported in Register-UCHook.
+Due to hook callback scriptblocks being implemented as async callbacks your registered hooks are not guaranteed to execute in order without some special handling in your emulation script. Once I figure out a generic method of forcing an order or execution, I will provide examples.

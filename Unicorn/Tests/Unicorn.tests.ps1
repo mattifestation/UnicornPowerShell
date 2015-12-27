@@ -7,35 +7,6 @@ $ModuleManifest = "$ModuleRoot\Unicorn.psd1"
 Remove-Module [U]nicorn
 Import-Module $ModuleManifest -Force -ErrorAction Stop
 
-function Assert-UCValidEmulatorSession {
-    param (
-        [Parameter(Mandatory = $True, ValueFromPipeline = $True)]
-        [PSObject]
-        [ValidateScript({ $_.PSObject.TypeNames[0] -eq 'UnicornEngine.EngineSession' })]
-        $Session,
-
-        [Management.Automation.InvocationInfo]
-        $Context
-    )
-
-    $ContextMessage = ''
-
-    if ($PSBoundParameters['Context']) {
-        $ContextMessage = "$($Context.InvocationName): "
-    }
-
-    if ($PSBoundParameters['Session'].Open -eq $False) {
-        throw "$($ContextMessage)Engine session was already closed."
-    }
-
-    if ($PSBoundParameters['Session'].EngineHandle -eq [IntPtr]::Zero) {
-        throw "$($ContextMessage)Session engine handle is null. You cannot operate a session with a null handle."
-    }
-
-    if (-not [Enum]::IsDefined([UnicornEngine.Const.uc_arch], $PSBoundParameters['Session'].Arch)) {
-        throw "$($ContextMessage)Invalid session architecture detected."
-    }
-}
 
 Describe 'Module wide tests' {
     Context 'proper dependencies loaded' {
@@ -106,36 +77,75 @@ Describe 'Get-UCVersion' {
 Describe 'New-UCEmulatorSession' {
     Context 'parameter validation' {
         It 'should accept expected X86 options' {
-            { New-UCEmulatorSession -X86 -X86Mode MODE_16 | Assert-UCValidEmulatorSession } | Should Not Throw
-            { New-UCEmulatorSession -X86 -X86Mode MODE_32 | Assert-UCValidEmulatorSession } | Should Not Throw
-            { New-UCEmulatorSession -X86 -X86Mode MODE_64 | Assert-UCValidEmulatorSession } | Should Not Throw
+            $Session = New-UCEmulatorSession -X86 -X86Mode MODE_16
+            $Session | Should Not BeNullOrEmpty
+            $Session | Remove-UCEmulatorSession
+
+            $Session = New-UCEmulatorSession -X86 -X86Mode MODE_32
+            $Session | Should Not BeNullOrEmpty
+            $Session | Remove-UCEmulatorSession
+
+            $Session = New-UCEmulatorSession -X86 -X86Mode MODE_64
+            $Session | Should Not BeNullOrEmpty
+            $Session | Remove-UCEmulatorSession
         }
 
         It 'should accept expected Arm options' {
-            { New-UCEmulatorSession -Arm -ArmMode MODE_ARM | Assert-UCValidEmulatorSession } | Should Not Throw
-            { New-UCEmulatorSession -Arm -ArmMode MODE_THUMB | Assert-UCValidEmulatorSession } | Should Not Throw
+            $Session = New-UCEmulatorSession -Arm -ArmMode MODE_ARM
+            $Session | Should Not BeNullOrEmpty
+            $Session | Remove-UCEmulatorSession
+
+            $Session = New-UCEmulatorSession -Arm -ArmMode MODE_THUMB
+            $Session | Should Not BeNullOrEmpty
+            $Session | Remove-UCEmulatorSession
         }
 
         It 'should accept expected Arm64 options' {
-            { New-UCEmulatorSession -Arm64 -Arm64Mode MODE_ARM | Assert-UCValidEmulatorSession } | Should Not Throw
-            { New-UCEmulatorSession -Arm64 -Arm64Mode MODE_V8 | Assert-UCValidEmulatorSession } | Should Not Throw
-            { New-UCEmulatorSession -Arm64 -Arm64Mode MODE_MCLASS | Assert-UCValidEmulatorSession } | Should Not Throw
+            $Session = New-UCEmulatorSession -Arm64 -Arm64Mode MODE_ARM
+            $Session | Should Not BeNullOrEmpty
+            $Session | Remove-UCEmulatorSession
+
+            $Session = New-UCEmulatorSession -Arm64 -Arm64Mode MODE_V8
+            $Session | Should Not BeNullOrEmpty
+            $Session | Remove-UCEmulatorSession
+
+            $Session = New-UCEmulatorSession -Arm64 -Arm64Mode MODE_MCLASS
+            $Session | Should Not BeNullOrEmpty
+            $Session | Remove-UCEmulatorSession
         }
 
         It 'should accept expected M68K options' {
-            { New-UCEmulatorSession -M68K | Assert-UCValidEmulatorSession } | Should Not Throw
+            $Session = New-UCEmulatorSession -M68K
+            $Session | Should Not BeNullOrEmpty
+            $Session | Remove-UCEmulatorSession
         }
 
         It 'should accept expected Sparc options' {
-            { New-UCEmulatorSession -Sparc -SparcMode MODE_32 | Assert-UCValidEmulatorSession } | Should Not Throw
-            { New-UCEmulatorSession -Sparc -SparcMode MODE_V9 | Assert-UCValidEmulatorSession } | Should Not Throw
+            $Session = New-UCEmulatorSession -Sparc -SparcMode MODE_32
+            $Session | Should Not BeNullOrEmpty
+            $Session | Remove-UCEmulatorSession
+
+            $Session = New-UCEmulatorSession -Sparc -SparcMode MODE_V9
+            $Session | Should Not BeNullOrEmpty
+            $Session | Remove-UCEmulatorSession
         }
 
         It 'should accept expected Mips options' {
-            { New-UCEmulatorSession -Mips -MipsMode MODE_MIPS32 | Assert-UCValidEmulatorSession } | Should Not Throw
-            { New-UCEmulatorSession -Mips -MipsMode MODE_MIPS64 | Assert-UCValidEmulatorSession } | Should Not Throw
-            { New-UCEmulatorSession -Mips -MipsMode MODE_MIPS32BE | Assert-UCValidEmulatorSession } | Should Not Throw
-            { New-UCEmulatorSession -Mips -MipsMode MODE_MIPS64BE | Assert-UCValidEmulatorSession } | Should Not Throw
+            $Session = New-UCEmulatorSession -Mips -MipsMode MODE_MIPS32
+            $Session | Should Not BeNullOrEmpty
+            $Session | Remove-UCEmulatorSession
+
+            $Session = New-UCEmulatorSession -Mips -MipsMode MODE_MIPS64
+            $Session | Should Not BeNullOrEmpty
+            $Session | Remove-UCEmulatorSession
+
+            $Session = New-UCEmulatorSession -Mips -MipsMode MODE_MIPS32BE
+            $Session | Should Not BeNullOrEmpty
+            $Session | Remove-UCEmulatorSession
+
+            $Session = New-UCEmulatorSession -Mips -MipsMode MODE_MIPS64BE
+            $Session | Should Not BeNullOrEmpty
+            $Session | Remove-UCEmulatorSession
         }
     }
 }
@@ -167,50 +177,17 @@ Describe 'Remove-UCEmulatorSession' {
             { Remove-UCEmulatorSession -Session 'foo' } | Should Throw
         }
 
-        It 'should not accept a closed session' {
-            $ClosedSession = New-Object -TypeName PSObject -Property @{
-                EngineHandle = [IntPtr] 0x41414141
-                Open = $False
-            }
-
-            $ClosedSession.PSObject.TypeNames[0] = 'UnicornEngine.EngineSession'
-
-            { Remove-UCEmulatorSession -Session $ClosedSession } | Should Throw
-        }
-
         It 'should not accept a null engine handle' {
-            $NullSession = New-Object -TypeName PSObject -Property @{
-                EngineHandle = [IntPtr]::Zero
-                Open = $True
-            }
-
-            $NullSession.PSObject.TypeNames[0] = 'UnicornEngine.EngineSession'
+            $NullSession = [IntPtr]::Zero
 
             { Remove-UCEmulatorSession -Session $NullSession } | Should Throw
-        }
-
-        It 'should not accept a closed session with a null engine handle' {
-            $InvalidSession = New-Object -TypeName PSObject -Property @{
-                EngineHandle = [IntPtr]::Zero
-                Open = $False
-            }
-
-            $InvalidSession.PSObject.TypeNames[0] = 'UnicornEngine.EngineSession'
-
-            { Remove-UCEmulatorSession -Session $InvalidSession } | Should Throw
         }
     }
 }
 
 Describe 'Initialize-UCMemoryMap' {
     Context 'parameter validation' {
-        $InvalidSession = New-Object -TypeName PSObject -Property @{
-            EngineHandle = [IntPtr]::Zero
-            Open = $False
-            Arch = 'BogusArch'
-        }
-
-        $InvalidSession.PSObject.TypeNames[0] = 'UnicornEngine.EngineSession'
+        $InvalidSession = [IntPtr]::Zero
 
         $ValidAddress = 0x1000000
         $ValidSize = 2 * 4KB
@@ -257,13 +234,7 @@ Describe 'Initialize-UCMemoryMap' {
 }
 
 Describe 'Set-UCMemoryProtection' {
-    $InvalidSession = New-Object -TypeName PSObject -Property @{
-        EngineHandle = [IntPtr]::Zero
-        Open = $False
-        Arch = 'BogusArch'
-    }
-
-    $InvalidSession.PSObject.TypeNames[0] = 'UnicornEngine.EngineSession'
+    $InvalidSession = [IntPtr]::Zero
 
     $ValidAddress = 0x1000000
     $ValidSize = 2 * 4KB
@@ -340,13 +311,7 @@ Describe 'Set-UCMemoryProtection' {
 }
 
 Describe 'Remove-UCMemoryMap' {
-    $InvalidSession = New-Object -TypeName PSObject -Property @{
-        EngineHandle = [IntPtr]::Zero
-        Open = $False
-        Arch = 'BogusArch'
-    }
-
-    $InvalidSession.PSObject.TypeNames[0] = 'UnicornEngine.EngineSession'
+    $InvalidSession = [IntPtr]::Zero
 
     $ValidAddress = 0x1000000
     $ValidSize = 2 * 4KB
@@ -424,13 +389,7 @@ Describe 'Remove-UCMemoryMap' {
 }
 
 Describe 'Write-UCMemory' {
-    $InvalidSession = New-Object -TypeName PSObject -Property @{
-        EngineHandle = [IntPtr]::Zero
-        Open = $False
-        Arch = 'BogusArch'
-    }
-
-    $InvalidSession.PSObject.TypeNames[0] = 'UnicornEngine.EngineSession'
+    $InvalidSession = [IntPtr]::Zero
 
     $MappedAddress = 0x1000000
     $ValidSize = 4KB
@@ -597,13 +556,7 @@ Describe 'Read-UCMemory' {
 }
 
 Describe 'Get-UCRegister' {
-    $InvalidSession = New-Object -TypeName PSObject -Property @{
-        EngineHandle = [IntPtr]::Zero
-        Open = $False
-        Arch = 'BogusArch'
-    }
-
-    $InvalidSession.PSObject.TypeNames[0] = 'UnicornEngine.EngineSession'
+    $InvalidSession = [IntPtr]::Zero
 
     $MappedAddress = 0x1000000
     $ValidSize = 4KB
@@ -722,13 +675,7 @@ Describe 'Get-UCRegister' {
 }
 
 Describe 'Set-UCRegister' {
-    $InvalidSession = New-Object -TypeName PSObject -Property @{
-        EngineHandle = [IntPtr]::Zero
-        Open = $False
-        Arch = 'BogusArch'
-    }
-
-    $InvalidSession.PSObject.TypeNames[0] = 'UnicornEngine.EngineSession'
+    $InvalidSession = [IntPtr]::Zero
 
     $MappedAddress = 0x1000000
     $ValidSize = 4KB
@@ -845,11 +792,7 @@ Describe 'Set-UCRegister' {
 }
 
 Describe 'Start-UCEmulatorSession' {
-    $InvalidSession = New-Object -TypeName PSObject -Property @{
-        EngineHandle = [IntPtr]::Zero
-        Open = $False
-        Arch = 'BogusArch'
-    }
+    $InvalidSession = [IntPtr]::Zero
 
     $X86Code = @(0x41, 0x4A) # INC ecx; DEC edx
     $Address = 0x1000000
@@ -880,7 +823,7 @@ Describe 'Start-UCEmulatorSession' {
         }
     }
 
-    # Note: these are only basic tests. Additional, architecture specific regression tests will be performed as well.
+    # Note: these are only basic tests. Additional, architecture specific regression tests should be performed as well.
     Context 'intended behavior' {
         It 'Should emulate simple opcodes correctly' {
             $EcxOld = 0x1234
@@ -937,6 +880,199 @@ Describe 'Start-UCEmulatorSession' {
             $Session | Set-UCRegister -RegisterX86 EDX -Value 0x7890
             { Start-UCEmulatorSession -Session $Session -StartAddress 0 -EndAddress (0 + $X86Code.Length) } | Should Throw
             $Session | Remove-UCEmulatorSession
+        }
+    }
+}
+
+Describe 'Register-UCHook' {
+    $InvalidSession = [IntPtr]::Zero
+
+    $X86Code = @(0x41) # INC ecx
+    $Address = 0x1000000
+
+    $CodeHook = {
+        param (
+            [IntPtr]
+            $Session,
+
+            [UInt64]
+            $Address,
+
+            [UInt32]
+            $Size
+        )
+
+        New-Event -SourceIdentifier TestHookEvent -MessageData 'Instruction executed!'
+    }
+
+    Context 'parameter validation' {
+        It 'should accept a valid session over the pipeline' {
+            $Session = New-UCEmulatorSession -X86 -X86Mode MODE_32
+            $Session | Initialize-UCMemoryMap -Address $Address -Size 2048KB
+            $Session | Write-UCMemory -Address $Address -Data $X86Code
+            { $HookHandle = $Session | Register-UCHook -CodeHook -Action $CodeHook } | Should Not Throw
+            $Session | Remove-UCEmulatorSession
+        }
+
+        It 'should accept a valid session argument passed as the -Session parameter' {
+            $Session = New-UCEmulatorSession -X86 -X86Mode MODE_32
+            $Session | Initialize-UCMemoryMap -Address $Address -Size 2048KB
+            $Session | Write-UCMemory -Address $Address -Data $X86Code
+            { $HookHandle = Register-UCHook -Session $Session -CodeHook -Action $CodeHook } | Should Not Throw
+            $Session | Remove-UCEmulatorSession
+        }
+
+        It 'should not accept an invalid session' {
+            { Register-UCHook -Session $InvalidSession -CodeHook -Action $CodeHook } | Should Throw
+        }
+    }
+
+    Context 'intended behavior' {
+        It 'should return a valid hook handle' {
+            $Session = New-UCEmulatorSession -X86 -X86Mode MODE_32
+            $Session | Initialize-UCMemoryMap -Address $Address -Size 2048KB
+            $Session | Write-UCMemory -Address $Address -Data $X86Code
+            $HookHandle = Register-UCHook -Session $Session -CodeHook -Action $CodeHook
+            $HookHandle -is [IntPtr] | Should Be $True
+            $HookHandle -ne [IntPtr]::Zero | Should Be $True
+            $Session | Remove-UCEmulatorSession
+        }
+
+        It 'should execute a sample hook scriptblock' {
+            $Session = New-UCEmulatorSession -X86 -X86Mode MODE_32
+            $Session | Initialize-UCMemoryMap -Address $Address -Size 2048KB
+            $Session | Write-UCMemory -Address $Address -Data $X86Code
+            $HookHandle = Register-UCHook -Session $Session -CodeHook -Action $CodeHook
+
+            $null = Remove-Event -SourceIdentifier TestHookEvent -ErrorAction Ignore
+            $Session | Start-UCEmulatorSession -StartAddress $Address -EndAddress ($Address + $X86Code.Length)
+            $HookEvent = @(Wait-Event -SourceIdentifier TestHookEvent -Timeout 10)
+            $HookEvent | Should Not BeNullOrEmpty
+            $HookEvent.Count -eq 1 | Should Be $True
+            $HookEvent.MessageData | Should Be 'Instruction executed!'
+            $HookEvent | Remove-Event -ErrorAction Ignore
+
+            $Session | Remove-UCEmulatorSession
+        }
+    }
+}
+
+Describe 'Remove-UCHook' {
+    $InvalidSession = [IntPtr]::Zero
+
+    $X86Code = @(0x41) # INC ecx
+    $Address = 0x1000000
+
+    $CodeHook = {
+        param (
+            [IntPtr]
+            $Session,
+
+            [UInt64]
+            $Address,
+
+            [UInt32]
+            $Size
+        )
+
+        New-Event -SourceIdentifier TestHookEvent -MessageData 'Instruction executed!'
+    }
+
+    Context 'parameter validation' {
+        It 'should accept a valid session over the pipeline' {
+            $Session = New-UCEmulatorSession -X86 -X86Mode MODE_32
+            $Session | Initialize-UCMemoryMap -Address $Address -Size 2048KB
+            $Session | Write-UCMemory -Address $Address -Data $X86Code
+            $HookHandle = $Session | Register-UCHook -CodeHook -Action $CodeHook
+            { $Session | Remove-UCHook -HookHandle $HookHandle } | Should Not Throw
+            $Session | Remove-UCEmulatorSession
+        }
+
+        It 'should accept a valid session argument passed as the -Session parameter' {
+            $Session = New-UCEmulatorSession -X86 -X86Mode MODE_32
+            $Session | Initialize-UCMemoryMap -Address $Address -Size 2048KB
+            $Session | Write-UCMemory -Address $Address -Data $X86Code
+            $HookHandle = $Session | Register-UCHook -CodeHook -Action $CodeHook
+            { Remove-UCHook -Session $Session -HookHandle $HookHandle } | Should Not Throw
+            $Session | Remove-UCEmulatorSession
+        }
+
+        It 'should not accept an invalid session' {
+            $Session = New-UCEmulatorSession -X86 -X86Mode MODE_32
+            $Session | Initialize-UCMemoryMap -Address $Address -Size 2048KB
+            $Session | Write-UCMemory -Address $Address -Data $X86Code
+            $HookHandle = Register-UCHook -Session $Session -CodeHook -Action $CodeHook
+            { Remove-UCHook -Session $InvalidSession -HookHandle $HookHandle } | Should Throw
+            $Session | Remove-UCEmulatorSession
+        }
+
+        It 'should not accept an invalid hook handle' {
+            $Session = New-UCEmulatorSession -X86 -X86Mode MODE_32
+            $Session | Initialize-UCMemoryMap -Address $Address -Size 2048KB
+            $Session | Write-UCMemory -Address $Address -Data $X86Code
+            { $Session | Remove-UCHook -HookHandle ([IntPtr]::Zero) } | Should Throw
+            $Session | Remove-UCEmulatorSession
+        }
+    }
+
+    Context 'intended behavior' {
+        It 'should clear the hook handle' {
+            $Session = New-UCEmulatorSession -X86 -X86Mode MODE_32
+            $Session | Initialize-UCMemoryMap -Address $Address -Size 2048KB
+            $Session | Write-UCMemory -Address $Address -Data $X86Code
+            $HookHandle = Register-UCHook -Session $Session -CodeHook -Action $CodeHook
+            $HookHandle -is [IntPtr] | Should Be $True
+            $HookHandle -ne [IntPtr]::Zero | Should Be $True
+            $Session | Remove-UCHook -HookHandle $HookHandle
+            $HookHandle -is [IntPtr] | Should Be $True
+            $HookHandle -eq [IntPtr]::Zero | Should Be $True
+            $Session | Remove-UCEmulatorSession
+        }
+    }
+}
+
+Describe 'New-UCHookTemplate' {
+    Context 'parameter validation' {
+        It 'should not output a scriptblock without a mandatory switch' {
+            { New-UCHookTemplate -ErrorAction Stop } | Should throw
+        }
+    }
+
+    Context 'intended behavior' {
+        It 'should return a code hook scriptblock' {
+            (New-UCHookTemplate -CodeHook) -is [ScriptBlock] | Should Be $True
+        }
+
+        It 'should return an interrupt hook scriptblock' {
+            (New-UCHookTemplate -InterruptHook) -is [ScriptBlock] | Should Be $True
+        }
+
+        It 'should return a basic block scriptblock' {
+            (New-UCHookTemplate -BasicBlockHook) -is [ScriptBlock] | Should Be $True
+        }
+
+        It 'should return a memory read hook scriptblock' {
+            (New-UCHookTemplate -MemoryReadHook) -is [ScriptBlock] | Should Be $True
+        }
+
+        It 'should return a memory write hook scriptblock' {
+            (New-UCHookTemplate -MemoryWriteHook) -is [ScriptBlock] | Should Be $True
+        }
+
+        It 'should return an invalid memory access scriptblock' {
+            (New-UCHookTemplate -InvalidMemAccessHook) -is [ScriptBlock] | Should Be $True
+        }
+
+        It 'should return a syscall scriptblock' {
+            (New-UCHookTemplate -SyscallHook) -is [ScriptBlock] | Should Be $True
+        }
+
+        It 'should return an x86 IN hook scriptblock' {
+            (New-UCHookTemplate -X86InHook) -is [ScriptBlock] | Should Be $True
+        }
+
+        It 'should return an x86 OUT hook scriptblock' {
+            (New-UCHookTemplate -X86OutHook) -is [ScriptBlock] | Should Be $True
         }
     }
 }

@@ -36,14 +36,8 @@ FunctionsToExport = @('Get-UCVersion',
                       'Get-UCRegister',
                       'Remove-UCEmulatorSession',
                       'Start-UCEmulatorSession',
-                      'Register-UCHook')
-
-# Cmdlets to export from this module
-CmdletsToExport = ''
-
-# Variables to export from this module
-VariablesToExport = ''
-
-# Aliases to export from this module
-AliasesToExport = ''
+                      'Stop-UCEmulatorSession',
+                      'Register-UCHook',
+                      'Remove-UCHook',
+                      'New-UCHookTemplate')
 }

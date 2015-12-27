@@ -127,7 +127,11 @@ $FunctionDefinitions = @(
     (func unicorn uc_reg_write ($UC_ERR) @([IntPtr], [UInt32], [Int64].MakeByRefType())),
     (func unicorn uc_reg_read ($UC_ERR) @([IntPtr], [UInt32], [Int64].MakeByRefType())),
     (func unicorn uc_emu_start ($UC_ERR) @([IntPtr], [UInt64], [UInt64], [UInt64], [UInt32])),
-    (func unicorn uc_hook_add ($UC_ERR) @([IntPtr], [IntPtr].MakeByRefType(), $UC_HOOK, [MulticastDelegate], [IntPtr], [UInt64], [UInt64]))
+    (func unicorn uc_emu_stop ($UC_ERR) @([IntPtr])),
+    (func unicorn uc_hook_del ($UC_ERR) @([IntPtr], [IntPtr])),
+    (func unicorn uc_hook_add_noargs ($UC_ERR) @([IntPtr], [IntPtr].MakeByRefType(), $UC_HOOK, [MulticastDelegate], [IntPtr]) -EntryPoint 'uc_hook_add'),
+    (func unicorn uc_hook_add_arg0 ($UC_ERR) @([IntPtr], [IntPtr].MakeByRefType(), $UC_HOOK, [MulticastDelegate], [IntPtr], [UInt64]) -EntryPoint 'uc_hook_add'),
+    (func unicorn uc_hook_add_arg0_arg1 ($UC_ERR) @([IntPtr], [IntPtr].MakeByRefType(), $UC_HOOK, [MulticastDelegate], [IntPtr], [UInt64], [UInt64]) -EntryPoint 'uc_hook_add')
 )
 
 $Types = $FunctionDefinitions | Add-Win32Type -Module $Mod -Namespace 'UnicornEngine.NativeMethods'
@@ -198,71 +202,250 @@ function Assert-UCError {
     }
 }
 
-function Assert-UCValidEmulatorSession {
-    param (
-        [Parameter(Mandatory = $True, ValueFromPipeline = $True)]
-        [PSObject]
-        [ValidateScript({ $_.PSObject.TypeNames[0] -eq 'UnicornEngine.EngineSession' })]
-        $Session,
+# This is a heavily modified version of Oisin Grehan's New-ScriptBlockCallback function.
+# Thank you to Oisin (@oising) for providing the syntax for customized callback function signatures!
+# Todo: Rewrite this using reflection versus calling Add-Type.
+function New-UCHookCallback {
+    param(
+        [Parameter(Mandatory = $True, ParameterSetName = 'CodeHook')]
+        [Switch]
+        $CodeHook,
 
-        [Management.Automation.InvocationInfo]
-        $Context
+        [Parameter(Mandatory = $True, ParameterSetName = 'InterruptHook')]
+        [Switch]
+        $InterruptHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'BlockHook')]
+        [Switch]
+        $BasicBlockHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'ReadMemHook')]
+        [Switch]
+        $MemoryReadHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'WriteMemHook')]
+        [Switch]
+        $MemoryWriteHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'InvalidMemHook')]
+        [Switch]
+        $InvalidMemAccessHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'SyscallHook')]
+        [Switch]
+        $SyscallHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'InHook')]
+        [Switch]
+        $X86InHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'OutHook')]
+        [Switch]
+        $X86OutHook,
+
+        [parameter(Mandatory = $True)]
+        [ValidateNotNullOrEmpty()]
+        [ScriptBlock]
+        $Action
     )
+  
+    if (-not ('CodeHookEventBridge' -as [Type])) {
+        Add-Type @'
+            using System;
+            using System.Runtime.InteropServices;
 
-    $ContextMessage = ''
+            public sealed class CodeBlockHookEventBridge
+            {
+                [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+                public delegate void Handler(IntPtr SessionHandle, UInt64 Address, UInt32 Size, IntPtr UserData);
 
-    if ($PSBoundParameters['Context']) {
-        $ContextMessage = "$($Context.InvocationName): "
+                public event Handler CallbackComplete = delegate { };
+
+                private CodeBlockHookEventBridge() {}
+
+                private void CallbackInternal(IntPtr SessionHandle, UInt64 Address, UInt32 Size, IntPtr UserData)
+                {
+                    CallbackComplete(SessionHandle, Address, Size, UserData);
+                }
+
+                public Handler Callback
+                {
+                    get { return new Handler(CallbackInternal); }
+                }
+
+                public static CodeBlockHookEventBridge Create()
+                {
+                    return new CodeBlockHookEventBridge();
+                }
+            }
+
+            public sealed class InterruptHookEventBridge
+            {
+                [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+                public delegate void Handler(IntPtr SessionHandle, UInt32 InterruptNumber, IntPtr UserData);
+
+                public event Handler CallbackComplete = delegate { };
+
+                private InterruptHookEventBridge() {}
+
+                private void CallbackInternal(IntPtr SessionHandle, UInt32 InterruptNumber, IntPtr UserData)
+                {
+                    CallbackComplete(SessionHandle, InterruptNumber, UserData);
+                }
+
+                public Handler Callback
+                {
+                    get { return new Handler(CallbackInternal); }
+                }
+
+                public static InterruptHookEventBridge Create()
+                {
+                    return new InterruptHookEventBridge();
+                }
+            }
+
+            public sealed class MemReadWriteHookEventBridge
+            {
+                [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+                public delegate void Handler(IntPtr SessionHandle, int MemType, UInt64 Address, int Size, Int64 Value, IntPtr UserData);
+
+                public event Handler CallbackComplete = delegate { };
+
+                private MemReadWriteHookEventBridge() {}
+
+                private void CallbackInternal(IntPtr SessionHandle, int MemType, UInt64 Address, int Size, Int64 Value, IntPtr UserData)
+                {
+                    CallbackComplete(SessionHandle, MemType, Address, Size, Value, UserData);
+                }
+
+                public Handler Callback
+                {
+                    get { return new Handler(CallbackInternal); }
+                }
+
+                public static MemReadWriteHookEventBridge Create()
+                {
+                    return new MemReadWriteHookEventBridge();
+                }
+            }
+
+            public sealed class InHookEventBridge
+            {
+                [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+                public delegate void Handler(IntPtr SessionHandle, UInt32 Port, int Size, IntPtr UserData);
+
+                public event Handler CallbackComplete = delegate { };
+
+                private InHookEventBridge() {}
+
+                private void CallbackInternal(IntPtr SessionHandle, UInt32 Port, int Size, IntPtr UserData)
+                {
+                    CallbackComplete(SessionHandle, Port, Size, UserData);
+                }
+
+                public Handler Callback
+                {
+                    get { return new Handler(CallbackInternal); }
+                }
+
+                public static InHookEventBridge Create()
+                {
+                    return new InHookEventBridge();
+                }
+            }
+
+            public sealed class OutHookEventBridge
+            {
+                [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+                public delegate void Handler(IntPtr SessionHandle, UInt32 Port, int Size, UInt32 Value, IntPtr UserData);
+
+                public event Handler CallbackComplete = delegate { };
+
+                private OutHookEventBridge() {}
+
+                private void CallbackInternal(IntPtr SessionHandle, UInt32 Port, int Size, UInt32 Value, IntPtr UserData)
+                {
+                    CallbackComplete(SessionHandle, Port, Size, Value, UserData);
+                }
+
+                public Handler Callback
+                {
+                    get { return new Handler(CallbackInternal); }
+                }
+
+                public static OutHookEventBridge Create()
+                {
+                    return new OutHookEventBridge();
+                }
+            }
+
+            public sealed class SyscallHookEventBridge
+            {
+                [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+                public delegate void Handler(IntPtr SessionHandle, IntPtr UserData);
+
+                public event Handler CallbackComplete = delegate { };
+
+                private SyscallHookEventBridge() {}
+
+                private void CallbackInternal(IntPtr SessionHandle, IntPtr UserData)
+                {
+                    CallbackComplete(SessionHandle, UserData);
+                }
+
+                public Handler Callback
+                {
+                    get { return new Handler(CallbackInternal); }
+                }
+
+                public static SyscallHookEventBridge Create()
+                {
+                    return new SyscallHookEventBridge();
+                }
+            }
+'@
     }
 
-    if ($PSBoundParameters['Session'].Open -eq $False) {
-        throw "$($ContextMessage)Engine session was already closed."
+    switch ($PSCmdlet.ParameterSetName) {
+        'CodeHook' {
+            $Bridge = [CodeBlockHookEventBridge]::Create()
+        }
+
+        'BlockHook' {
+            $Bridge = [CodeBlockHookEventBridge]::Create()
+        }
+
+        'InterruptHook' {
+            $Bridge = [InterruptHookEventBridge]::Create()
+        }
+
+        'ReadMemHook' {
+            $Bridge = [MemReadWriteHookEventBridge]::Create()
+        }
+
+        'WriteMemHook' {
+            $Bridge = [MemReadWriteHookEventBridge]::Create()
+        }
+
+        'InvalidMemHook' {
+            $Bridge = [MemReadWriteHookEventBridge]::Create()
+        }
+
+        'InHook' {
+            $Bridge = [InHookEventBridge]::Create()
+        }
+
+        'OutHook' {
+            $Bridge = [OutHookEventBridge]::Create()
+        }
+
+        'SyscallHook' {
+            $Bridge = [SyscallHookEventBridge]::Create()
+        }
     }
 
-    if ($PSBoundParameters['Session'].EngineHandle -eq [IntPtr]::Zero) {
-        throw "$($ContextMessage)Session engine handle is null. You cannot operate a session with a null handle."
-    }
-
-    if (-not [Enum]::IsDefined([UnicornEngine.Const.uc_arch], $PSBoundParameters['Session'].Arch)) {
-        throw "$($ContextMessage)Invalid session architecture detected."
-    }
-}
-
-function Get-DelegateType
-{
-    [OutputType([Type])]
-    Param
-    ( 
-        [Parameter( Position = 0)]
-        [Type[]]
-        $Parameters = (New-Object Type[](0)),
-            
-        [Parameter( Position = 1 )]
-        [Type]
-        $ReturnType = [Void],
-
-        [System.Runtime.InteropServices.CallingConvention]
-        $CallingConvention
-    )
-
-    $Domain = [AppDomain]::CurrentDomain
-    $DynAssembly = New-Object System.Reflection.AssemblyName('ReflectedDelegate')
-    $AssemblyBuilder = $Domain.DefineDynamicAssembly($DynAssembly, [System.Reflection.Emit.AssemblyBuilderAccess]::Run)
-    $ModuleBuilder = $AssemblyBuilder.DefineDynamicModule('InMemoryModule', $false)
-    $TypeBuilder = $ModuleBuilder.DefineType('MyDelegateType', 'Class, Public, Sealed, AnsiClass, AutoClass', [System.MulticastDelegate])
-
-    if ($PSBoundParameters['CallingConvention']) {
-        $CallingConventionConstructor = [Runtime.InteropServices.UnmanagedFunctionPointerAttribute].GetConstructor(@([Runtime.InteropServices.CallingConvention]))
-        $ConstructorBuilder = New-Object Reflection.Emit.CustomAttributeBuilder($CallingConventionConstructor, [Object[]] @($PSBoundParameters['CallingConvention']))
-        $TypeBuilder.SetCustomAttribute($ConstructorBuilder)
-    }
-
-    $ConstructorBuilder = $TypeBuilder.DefineConstructor('RTSpecialName, HideBySig, Public', [System.Reflection.CallingConventions]::Standard, $Parameters)
-    $ConstructorBuilder.SetImplementationFlags('Runtime, Managed')
-    $MethodBuilder = $TypeBuilder.DefineMethod('Invoke', 'Public, HideBySig, NewSlot, Virtual', $ReturnType, $Parameters)
-    $MethodBuilder.SetImplementationFlags('Runtime, Managed')
-        
-    Write-Output $TypeBuilder.CreateType()
+    $null = Register-ObjectEvent -InputObject $Bridge -EventName CallbackComplete -Action $Action -MessageData $args
+    $Bridge.Callback
 }
 #endregion
 
@@ -356,10 +539,10 @@ None
 
 PSObject
 
-Outputs a session object (Type name: "UnicornEngine.EngineSession") consisting of an emulator handle, handle status, and specified architecture.
+Outputs an IntPtr representing the emulator handle.
 #>
 
-    [OutputType([PSObject])]
+    [OutputType([IntPtr])]
     param (
         [Parameter(Mandatory = $True, Position = 0, ParameterSetName = 'X86')]
         [Switch]
@@ -446,16 +629,7 @@ Outputs a session object (Type name: "UnicornEngine.EngineSession") consisting o
 
     if ($UCEngine -eq [IntPtr]::Zero) { throw 'Unable to obtain engine handle.' }
 
-    $Properties = @{
-        EngineHandle = $UCEngine
-        Open = $True
-        Arch = $Architecture
-    }
-
-    $EngineSession = New-Object -TypeName PSObject -Property $Properties
-    $EngineSession.PSObject.TypeNames[0] = 'UnicornEngine.EngineSession'
-
-    return $EngineSession
+    return $UCEngine
 }
 
 function Initialize-UCMemoryMap {
@@ -470,7 +644,7 @@ Initialize-UCMemoryMap maps in a memory page of a specific size and protection f
 
 .PARAMETER Session
 
-The Unicorn Engine emulator session object returned from New-UCEmulatorSession.
+The Unicorn Engine emulator handle returned from New-UCEmulatorSession.
 
 .PARAMETER Address
 
@@ -503,7 +677,7 @@ PS C:\>$Session | Initialize-UCMemoryMap -Address 0x1000000 -Size (2 * 4KB) -Pro
 
 PSObject
 
-You can pipe a Unicorn Engine session object returned from New-UCEmulatorSession to Initialize-UCMemoryMap.
+You can pipe a Unicorn Engine session handle returned from New-UCEmulatorSession to Initialize-UCMemoryMap.
 
 .OUTPUTS
 
@@ -512,8 +686,8 @@ None
 
     param (
         [Parameter(Mandatory = $True, ValueFromPipeline = $True)]
-        [PSObject]
-        [ValidateScript({ $_.PSObject.TypeNames[0] -eq 'UnicornEngine.EngineSession' })]
+        [IntPtr]
+        [ValidateScript({ $_ -and ($_ -ne [IntPtr]::Zero) })]
         $Session,
 
         [Parameter(Mandatory = $True)]
@@ -530,9 +704,7 @@ None
         $Protection = [UnicornEngine.Const.uc_prot]::ALL
     )
 
-    Assert-UCValidEmulatorSession -Session $Session -Context $MyInvocation
-
-    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_mem_map($Session.EngineHandle, $Address, $Size, $Protection)
+    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_mem_map($Session, $Address, $Size, $Protection)
 
     Assert-UCError -ErrorCode $Status -Context $MyInvocation
 }
@@ -549,7 +721,7 @@ Remove-UCMemoryMap unmaps a previously mapped region of memory.
 
 .PARAMETER Session
 
-The Unicorn Engine emulator session object returned from New-UCEmulatorSession.
+The Unicorn Engine emulator handle returned from New-UCEmulatorSession.
 
 .PARAMETER Address
 
@@ -569,7 +741,7 @@ PS C:\>$Session | Remove-UCMemoryMap -Address 0x1000000 -Size (2 * 4KB)
 
 PSObject
 
-You can pipe a Unicorn Engine session object returned from New-UCEmulatorSession to Remove-UCMemoryMap.
+You can pipe a Unicorn Engine session handle returned from New-UCEmulatorSession to Remove-UCMemoryMap.
 
 .OUTPUTS
 
@@ -578,8 +750,8 @@ None
 
     param (
         [Parameter(Mandatory = $True, ValueFromPipeline = $True)]
-        [PSObject]
-        [ValidateScript({ $_.PSObject.TypeNames[0] -eq 'UnicornEngine.EngineSession' })]
+        [IntPtr]
+        [ValidateScript({ $_ -and ($_ -ne [IntPtr]::Zero) })]
         $Session,
 
         [Parameter(Mandatory = $True)]
@@ -593,9 +765,7 @@ None
         $Size
     )
 
-    Assert-UCValidEmulatorSession -Session $Session -Context $MyInvocation
-
-    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_mem_unmap($Session.EngineHandle, $Address, $Size)
+    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_mem_unmap($Session, $Address, $Size)
 
     Assert-UCError -ErrorCode $Status -Context $MyInvocation
 }
@@ -612,7 +782,7 @@ Set-UCMemoryProtection changes permissions on an existing memory region.
 
 .PARAMETER Session
 
-The Unicorn Engine emulator session object returned from New-UCEmulatorSession.
+The Unicorn Engine emulator handle returned from New-UCEmulatorSession.
 
 .PARAMETER Address
 
@@ -636,7 +806,7 @@ PS C:\>$Session | Set-UCMemoryProtection -Address 0x1000000 -Size (2 * 4KB) -Pro
 
 PSObject
 
-You can pipe a Unicorn Engine session object returned from New-UCEmulatorSession to Initialize-UCMemoryMap.
+You can pipe a Unicorn Engine session handle returned from New-UCEmulatorSession to Initialize-UCMemoryMap.
 
 .OUTPUTS
 
@@ -645,8 +815,8 @@ None
 
     param (
         [Parameter(Mandatory = $True, ValueFromPipeline = $True)]
-        [PSObject]
-        [ValidateScript({ $_.PSObject.TypeNames[0] -eq 'UnicornEngine.EngineSession' })]
+        [IntPtr]
+        [ValidateScript({ $_ -and ($_ -ne [IntPtr]::Zero) })]
         $Session,
 
         [Parameter(Mandatory = $True)]
@@ -663,9 +833,7 @@ None
         $Protection = [UnicornEngine.Const.uc_prot]::ALL
     )
 
-    Assert-UCValidEmulatorSession -Session $Session -Context $MyInvocation
-
-    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_mem_protect($Session.EngineHandle, $Address, $Size, $Protection)
+    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_mem_protect($Session, $Address, $Size, $Protection)
 
     Assert-UCError -ErrorCode $Status -Context $MyInvocation
 }
@@ -682,7 +850,7 @@ Write-UCMemory writes to a range of bytes previously mapped in memory with the I
 
 .PARAMETER Session
 
-The Unicorn Engine emulator session object returned from New-UCEmulatorSession.
+The Unicorn Engine emulator handle returned from New-UCEmulatorSession.
 
 .PARAMETER Address
 
@@ -702,7 +870,7 @@ PS C:\>$Session | Write-UCMemory -Address 0x1000000 -Data @(0x90, 0x90, 0x90)
 
 PSObject
 
-You can pipe a Unicorn Engine session object returned from New-UCEmulatorSession to Write-UCMemory.
+You can pipe a Unicorn Engine session handle returned from New-UCEmulatorSession to Write-UCMemory.
 
 .OUTPUTS
 
@@ -711,8 +879,8 @@ None
 
     param (
         [Parameter(Mandatory = $True, ValueFromPipeline = $True)]
-        [PSObject]
-        [ValidateScript({ $_.PSObject.TypeNames[0] -eq 'UnicornEngine.EngineSession' })]
+        [IntPtr]
+        [ValidateScript({ $_ -and ($_ -ne [IntPtr]::Zero) })]
         $Session,
 
         [Parameter(Mandatory = $True)]
@@ -725,9 +893,7 @@ None
         $Data
     )
 
-    Assert-UCValidEmulatorSession -Session $Session -Context $MyInvocation
-
-    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_mem_write($Session.EngineHandle, $Address, $Data, $Data.Length)
+    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_mem_write($Session, $Address, $Data, $Data.Length)
 
     Assert-UCError -ErrorCode $Status -Context $MyInvocation
 }
@@ -744,7 +910,7 @@ Write-UCMemory writes to a range of bytes previously mapped in memory with the I
 
 .PARAMETER Session
 
-The Unicorn Engine emulator session object returned from New-UCEmulatorSession.
+The Unicorn Engine emulator handle returned from New-UCEmulatorSession.
 
 .PARAMETER Address
 
@@ -765,7 +931,7 @@ PS C:\>$Session | Read-UCMemory -Address 0x1000000 -Size 3
 
 PSObject
 
-You can pipe a Unicorn Engine session object returned from New-UCEmulatorSession to Read-UCMemory.
+You can pipe a Unicorn Engine session handle returned from New-UCEmulatorSession to Read-UCMemory.
 
 .OUTPUTS
 
@@ -777,8 +943,8 @@ Outputs a byte array consisting of the data read from memory.
     [OutputType([Byte[]])]
     param (
         [Parameter(Mandatory = $True, ValueFromPipeline = $True)]
-        [PSObject]
-        [ValidateScript({ $_.PSObject.TypeNames[0] -eq 'UnicornEngine.EngineSession' })]
+        [IntPtr]
+        [ValidateScript({ $_ -and ($_ -ne [IntPtr]::Zero) })]
         $Session,
 
         [Parameter(Mandatory = $True)]
@@ -791,11 +957,9 @@ Outputs a byte array consisting of the data read from memory.
         $Size
     )
 
-    Assert-UCValidEmulatorSession -Session $Session -Context $MyInvocation
-
     $Bytes = New-Object Byte[]($Size)
 
-    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_mem_read($Session.EngineHandle, $Address, $Bytes, $Size)
+    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_mem_read($Session, $Address, $Bytes, $Size)
 
     Assert-UCError -ErrorCode $Status -Context $MyInvocation
 
@@ -814,7 +978,7 @@ Set-UCRegister writes a value to the specified register.
 
 .PARAMETER Session
 
-The Unicorn Engine emulator session object returned from New-UCEmulatorSession.
+The Unicorn Engine emulator handle returned from New-UCEmulatorSession.
 
 .PARAMETER RegisterX86
 
@@ -862,7 +1026,7 @@ PS C:\>$SetValue = $Session | Set-UCRegister -RegisterX86 EAX -Value 0x1234 -Pas
 
 PSObject
 
-You can pipe a Unicorn Engine session object returned from New-UCEmulatorSession to Set-UCRegister.
+You can pipe a Unicorn Engine session handle returned from New-UCEmulatorSession to Set-UCRegister.
 
 .OUTPUTS
 
@@ -874,38 +1038,32 @@ If the -PassThru switch is specified, Set-UCRegister outputs the value of the sp
     [OutputType([Int64])]
     param (
         [Parameter(Mandatory = $True, ValueFromPipeline = $True)]
-        [PSObject]
-        [ValidateScript({ $_.PSObject.TypeNames[0] -eq 'UnicornEngine.EngineSession' })]
+        [IntPtr]
+        [ValidateScript({ $_ -and ($_ -ne [IntPtr]::Zero) })]
         $Session,
 
         [Parameter(Mandatory = $True, Position = 0, ParameterSetName = 'RegisterX86')]
         [UnicornEngine.Const.Reg.X86]
-        [ValidateScript({ [Enum]::IsDefined($_.GetType(), $_) })]
         $RegisterX86,
 
         [Parameter(Mandatory = $True, Position = 0, ParameterSetName = 'RegisterArm')]
         [UnicornEngine.Const.Reg.Arm]
-        [ValidateScript({ [Enum]::IsDefined($_.GetType(), $_) })]
         $RegisterArm,
 
         [Parameter(Mandatory = $True, Position = 0, ParameterSetName = 'RegisterArm64')]
         [UnicornEngine.Const.Reg.Arm64]
-        [ValidateScript({ [Enum]::IsDefined($_.GetType(), $_) })]
         $RegisterArm64,
 
         [Parameter(Mandatory = $True, Position = 0, ParameterSetName = 'RegisterM68K')]
         [UnicornEngine.Const.Reg.M68K]
-        [ValidateScript({ [Enum]::IsDefined($_.GetType(), $_) })]
         $RegisterM68K,
 
         [Parameter(Mandatory = $True, Position = 0, ParameterSetName = 'RegisterMips')]
         [UnicornEngine.Const.Reg.Mips]
-        [ValidateScript({ [Enum]::IsDefined($_.GetType(), $_) })]
         $RegisterMips,
 
         [Parameter(Mandatory = $True, Position = 0, ParameterSetName = 'RegisterSparc')]
         [UnicornEngine.Const.Reg.Sparc]
-        [ValidateScript({ [Enum]::IsDefined($_.GetType(), $_) })]
         $RegisterSparc,
 
         [Parameter(Mandatory = $True, Position = 1)]
@@ -916,43 +1074,16 @@ If the -PassThru switch is specified, Set-UCRegister outputs the value of the sp
         $PassThru
     )
 
-    Assert-UCValidEmulatorSession -Session $Session -Context $MyInvocation
-
-    $ErrorMessage = "$($PSCmdlet.ParameterSetName.Substring('Register'.Length)) registers must match their respective architecture ($($Session.Arch))."
-
     switch ($PSCmdlet.ParameterSetName) {
-        'RegisterX86' {
-            if ($Session.Arch -ne 'ARCH_X86') { throw $ErrorMessage }
-            $Register = $RegisterX86
-        }
-
-        'RegisterArm' {
-            if ($Session.Arch -ne 'ARCH_ARM') { throw $ErrorMessage }
-            $Register = $RegisterArm
-        }
-
-        'RegisterArm64' {
-            if ($Session.Arch -ne 'ARCH_ARM64') { throw $ErrorMessage }
-            $Register = $RegisterArm64
-        }
-
-        'RegisterM68K' {
-            if ($Session.Arch -ne 'ARCH_M68K') { throw $ErrorMessage }
-            $Register = $RegisterM68K
-        }
-
-        'RegisterMips' {
-            if ($Session.Arch -ne 'ARCH_MIPS') { throw $ErrorMessage }
-            $Register = $RegisterMips
-        }
-
-        'RegisterSparc' {
-            if ($Session.Arch -ne 'ARCH_SPARC') { throw $ErrorMessage }
-            $Register = $RegisterSparc
-        }
+        'RegisterX86' { $Register = $RegisterX86 }
+        'RegisterArm' { $Register = $RegisterArm }
+        'RegisterArm64' { $Register = $RegisterArm64 }
+        'RegisterM68K' { $Register = $RegisterM68K }
+        'RegisterMips' { $Register = $RegisterMips }
+        'RegisterSparc' { $Register = $RegisterSparc }
     }
 
-    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_reg_write($Session.EngineHandle, $Register, [Ref] $Value)
+    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_reg_write($Session, $Register, [Ref] $Value)
 
     Assert-UCError -ErrorCode $Status -Context $MyInvocation
 
@@ -979,7 +1110,7 @@ Get-UCRegister reads the value from a specified register.
 
 .PARAMETER Session
 
-The Unicorn Engine emulator session object returned from New-UCEmulatorSession.
+The Unicorn Engine emulator handle returned from New-UCEmulatorSession.
 
 .PARAMETER RegisterX86
 
@@ -1015,7 +1146,7 @@ PS C:\>$Session | Get-UCRegister -RegisterX86 EAX
 
 PSObject
 
-You can pipe a Unicorn Engine session object returned from New-UCEmulatorSession to Get-UCRegister.
+You can pipe a Unicorn Engine session handle returned from New-UCEmulatorSession to Get-UCRegister.
 
 .OUTPUTS
 
@@ -1027,80 +1158,47 @@ Outputs the value of the specified register.
     [OutputType([Int64])]
     param (
         [Parameter(Mandatory = $True, ValueFromPipeline = $True)]
-        [PSObject]
-        [ValidateScript({ $_.PSObject.TypeNames[0] -eq 'UnicornEngine.EngineSession' })]
+        [IntPtr]
+        [ValidateScript({ $_ -and ($_ -ne [IntPtr]::Zero) })]
         $Session,
 
         [Parameter(Mandatory = $True, Position = 0, ParameterSetName = 'RegisterX86')]
         [UnicornEngine.Const.Reg.X86]
-        [ValidateScript({ [Enum]::IsDefined($_.GetType(), $_) })]
         $RegisterX86,
 
         [Parameter(Mandatory = $True, Position = 0, ParameterSetName = 'RegisterArm')]
         [UnicornEngine.Const.Reg.Arm]
-        [ValidateScript({ [Enum]::IsDefined($_.GetType(), $_) })]
         $RegisterArm,
 
         [Parameter(Mandatory = $True, Position = 0, ParameterSetName = 'RegisterArm64')]
         [UnicornEngine.Const.Reg.Arm64]
-        [ValidateScript({ [Enum]::IsDefined($_.GetType(), $_) })]
         $RegisterArm64,
 
         [Parameter(Mandatory = $True, Position = 0, ParameterSetName = 'RegisterM68K')]
         [UnicornEngine.Const.Reg.M68K]
-        [ValidateScript({ [Enum]::IsDefined($_.GetType(), $_) })]
         $RegisterM68K,
 
         [Parameter(Mandatory = $True, Position = 0, ParameterSetName = 'RegisterMips')]
         [UnicornEngine.Const.Reg.Mips]
-        [ValidateScript({ [Enum]::IsDefined($_.GetType(), $_) })]
         $RegisterMips,
 
         [Parameter(Mandatory = $True, Position = 0, ParameterSetName = 'RegisterSparc')]
         [UnicornEngine.Const.Reg.Sparc]
-        [ValidateScript({ [Enum]::IsDefined($_.GetType(), $_) })]
         $RegisterSparc
     )
 
-    Assert-UCValidEmulatorSession -Session $Session -Context $MyInvocation
-
-    $ErrorMessage = "$($PSCmdlet.ParameterSetName.Substring('Register'.Length)) registers must match their respective architecture ($($Session.Arch))."
-
     switch ($PSCmdlet.ParameterSetName) {
-        'RegisterX86' {
-            if ($Session.Arch -ne 'ARCH_X86') { throw $ErrorMessage }
-            $Register = $RegisterX86
-        }
-
-        'RegisterArm' {
-            if ($Session.Arch -ne 'ARCH_ARM') { throw $ErrorMessage }
-            $Register = $RegisterArm
-        }
-
-        'RegisterArm64' {
-            if ($Session.Arch -ne 'ARCH_ARM64') { throw $ErrorMessage }
-            $Register = $RegisterArm64
-        }
-
-        'RegisterM68K' {
-            if ($Session.Arch -ne 'ARCH_M68K') { throw $ErrorMessage }
-            $Register = $RegisterM68K
-        }
-
-        'RegisterMips' {
-            if ($Session.Arch -ne 'ARCH_MIPS') { throw $ErrorMessage }
-            $Register = $RegisterMips
-        }
-
-        'RegisterSparc' {
-            if ($Session.Arch -ne 'ARCH_SPARC') { throw $ErrorMessage }
-            $Register = $RegisterSparc
-        }
+        'RegisterX86' { $Register = $RegisterX86 }
+        'RegisterArm' { $Register = $RegisterArm }
+        'RegisterArm64' { $Register = $RegisterArm64 }
+        'RegisterM68K' { $Register = $RegisterM68K }
+        'RegisterMips' { $Register = $RegisterMips }
+        'RegisterSparc' { $Register = $RegisterSparc }
     }
 
     $Value = [Int64] 0
 
-    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_reg_read($Session.EngineHandle, $Register, [Ref] $Value)
+    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_reg_read($Session, $Register, [Ref] $Value)
 
     Assert-UCError -ErrorCode $Status -Context $MyInvocation
 
@@ -1119,7 +1217,7 @@ In order to prevent memory leaks, you should call Remove-UCEmulatorSession in or
 
 .PARAMETER Session
 
-The Unicorn Engine emulator session object returned from New-UCEmulatorSession.
+The Unicorn Engine emulator handle returned from New-UCEmulatorSession.
 
 .EXAMPLE
 
@@ -1130,27 +1228,30 @@ PS C:\>$Session | Remove-UCEmulatorSession
 
 PSObject
 
-You can pipe a Unicorn Engine session object returned from New-UCEmulatorSession to Remove-UCEmulatorSession.
+You can pipe a Unicorn Engine session handle returned from New-UCEmulatorSession to Remove-UCEmulatorSession.
 
 .OUTPUTS
 
 None
+
+.NOTES
+
+Remove-UCEmulatorSession zeroes out the argument passed in via -Session. This is to help ensure that a previous hook handle is not reused.
 #>
 
     param (
         [Parameter(Mandatory = $True, ValueFromPipeline = $True)]
-        [PSObject]
-        [ValidateScript({ $_.PSObject.TypeNames[0] -eq 'UnicornEngine.EngineSession' })]
+        [IntPtr]
+        [ValidateScript({ $_ -and ($_ -ne [IntPtr]::Zero) })]
         $Session
     )
 
-    Assert-UCValidEmulatorSession -Session $Session -Context $MyInvocation
+    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_close($Session)
 
-    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_close($Session.EngineHandle)
-
-    # Invalidate the session object so that it can no longer be used
-    $Session.Open = $False
-    $Session.EngineHandle = [IntPtr]::Zero
+    # Invalidate the session handle so that it can no longer be used
+    # Yes, I know I'm violating the rules of scope by doing this but it is
+    # imperitive that the argument passed in the parent scope be set to zero.
+    [IntPtr].GetField('m_value', [Reflection.BindingFlags] 'NonPublic, Instance').SetValue($Session, [IntPtr]::Zero)
 
     Assert-UCError -ErrorCode $Status -Context $MyInvocation
 }
@@ -1167,7 +1268,7 @@ Start-UCEmulatorSession
 
 .PARAMETER Session
 
-The Unicorn Engine emulator session object returned from New-UCEmulatorSession.
+The Unicorn Engine emulator handle returned from New-UCEmulatorSession.
 
 .PARAMETER StartAddress
 
@@ -1203,7 +1304,7 @@ PS C:\>$Session | Remove-UCEmulatorSession
 
 PSObject
 
-You can pipe a Unicorn Engine session object returned from New-UCEmulatorSession to Start-UCEmulatorSession.
+You can pipe a Unicorn Engine session handle returned from New-UCEmulatorSession to Start-UCEmulatorSession.
 
 .OUTPUTS
 
@@ -1212,8 +1313,8 @@ None
 
     param (
         [Parameter(Mandatory = $True, ValueFromPipeline = $True)]
-        [PSObject]
-        [ValidateScript({ $_.PSObject.TypeNames[0] -eq 'UnicornEngine.EngineSession' })]
+        [IntPtr]
+        [ValidateScript({ $_ -and ($_ -ne [IntPtr]::Zero) })]
         $Session,
 
         [Parameter(Mandatory = $True)]
@@ -1231,9 +1332,70 @@ None
         $Count = 0
     )
 
-    Assert-UCValidEmulatorSession -Session $Session -Context $MyInvocation
+    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_emu_start($Session, $StartAddress, $EndAddress, $Timeout, $Count)
 
-    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_emu_start($Session.EngineHandle, $StartAddress, $EndAddress, $Timeout, $Count)
+    Assert-UCError -ErrorCode $Status -Context $MyInvocation
+}
+
+function Stop-UCEmulatorSession {
+<#
+.SYNOPSIS
+
+Halts the emulator that was started with Start-UCEmulatorSession.
+
+.DESCRIPTION
+
+Stop-UCEmulatorSession halts the emulator that was started with Start-UCEmulatorSession. It is intended to only execute within a hook callback scriptblock.
+
+.PARAMETER Session
+
+The Unicorn Engine emulator handle returned from New-UCEmulatorSession.
+
+.EXAMPLE
+
+PS C:\>$X86Code = @(0x41) # INC ecx
+PS C:\>$Address = 0x1000000
+PS C:\>$CodeHook = {
+    param (
+        [IntPtr]
+        $Session,
+
+        [UInt64]
+        $Address,
+
+        [UInt32]
+        $Size
+    )
+
+    $Session | Stop-UCEmulatorSession
+}
+
+PS C:\>$Session = New-UCEmulatorSession -X86 -X86Mode MODE_32
+PS C:\>$Session | Initialize-UCMemoryMap -Address $Address -Size 2048KB
+PS C:\>$Session | Write-UCMemory -Address $Address -Data $X86Code
+PS C:\>$HookHandle = $Session | Register-UCHook -CodeHook -Action $CodeHook
+PS C:\>$Session | Start-UCEmulatorSession -StartAddress $Address -EndAddress ($Address + $X86Code.Length)
+PS C:\>$Session | Remove-UCEmulatorSession
+
+.INPUTS
+
+PSObject
+
+You can pipe a Unicorn Engine session handle returned from New-UCEmulatorSession to Read-UCMemory.
+
+.OUTPUTS
+
+None
+#>
+
+    param (
+        [Parameter(Mandatory = $True, ValueFromPipeline = $True)]
+        [IntPtr]
+        [ValidateScript({ $_ -and ($_ -ne [IntPtr]::Zero) })]
+        $Session
+    )
+
+    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_emu_stop($Session)
 
     Assert-UCError -ErrorCode $Status -Context $MyInvocation
 }
@@ -1248,19 +1410,59 @@ Register a scriptblock callback for a hook event.
 
 Register-UCHook registers a user-provided scriptblock that will execute upon the firing of a hook event. Currently, Register-UCHook only supports code hooks.
 
-HELP!!! Due to the thread that executes the hooks not having its own runspace, PowerShell scriptblocks will not execute in the context of the thread. The ability to execute scriptblocks in response to hook events is considered a core feature of the PowerShell Unicorn binding so if someone can figure out how to get this working, I would be eternally grateful!!! Thus far, I have tried the techniques explained in the following articles:
-http://www.nivot.org/post/2009/10/09/PowerShell20AsynchronousCallbacksFromNET
-http://www.exploit-monday.com/2013/06/PowerShellCallbackFunctions.html
-
-The python implementation of callback registration can be found here: https://github.com/unicorn-engine/unicorn/blob/master/bindings/python/unicorn/unicorn.py#L301
+Thank you to Oisin Grehan (@oising) for figuring out how to get scriptblock instrumentation callbacks working!!!
 
 .PARAMETER Session
 
-The Unicorn Engine emulator session object returned from New-UCEmulatorSession.
+The Unicorn Engine emulator handle returned from New-UCEmulatorSession.
 
 .PARAMETER Action
 
 Specifies the scriptblock that will execute upon firing of an instrumentation hook.
+
+.PARAMETER CodeHook
+
+Specifies that a code hook is to be registered.
+
+.PARAMETER InterruptHook
+
+Specifies that an interrupt hook is to be registered.
+
+.PARAMETER BasicBlockHook
+
+Specifies that a basic block is to be registered.
+
+.PARAMETER MemoryReadHook
+
+Specifies that a memory read hook is to be registered.
+
+.PARAMETER MemoryWriteHook
+
+Specifies that a memory write hook is to be registered.
+
+.PARAMETER InvalidMemAccessHook
+
+Specifies that an invalid memory access hook is to be registered.
+
+.PARAMETER SyscallHook
+
+Specifies that a syscall hook is to be registered.
+
+.PARAMETER X86InHook
+
+Specifies that an x86 IN hook is to be registered.
+
+.PARAMETER X86OutHook
+
+Specifies that an x86 OUT hook is to be registered.
+
+.PARAMETER BeginAddress
+
+Trigger the callback at and above execution of instructions at this address.
+
+.PARAMETER EndAddress
+
+Trigger the callback at and below execution of instructions at this address.
 
 .EXAMPLE
 
@@ -1270,84 +1472,553 @@ PS C:\>$Address = 0x1000000
 PS C:\>$CodeHook = {
     param (
         [IntPtr]
-        $SessionHandle,
+        $Session,
 
         [UInt64]
         $Address,
 
         [UInt32]
-        $Size,
-
-        [IntPtr]
-        $UserData
+        $Size
     )
 
-    Write-Host "0x$($SessionHandle.ToString('X16'))"
-    Write-Host "0x$($Address.ToString('X16')))"
-    Write-Host "0x$($Size.ToString('X8')))"
-    Write-Host "0x$($UserData.ToString('X16')))"
+    Write-Host 'Operation: Instruction executed'
+    Write-Host "Session handle: 0x$($Session.ToString('X16'))"
+    Write-Host "Instruction address: 0x$($Address.ToString('X16')))"
+    Write-Host "Instruction size: 0x$($Size.ToString('X8')))"
 }
 
 PS C:\>$Session = New-UCEmulatorSession -X86 -X86Mode MODE_32
 PS C:\>$Session | Initialize-UCMemoryMap -Address $Address -Size 2048KB
 PS C:\>$Session | Write-UCMemory -Address $Address -Data $X86Code
-PS C:\>$Session | Set-UCRegister -RegisterX86 ECX -Value 0x1234
-PS C:\>$Session | Set-UCRegister -RegisterX86 EDX -Value 0x7890
-PS C:\>$Session | Register-UCHook -Action $CodeHook
+PS C:\>$CodeHookHandle = $Session | Register-UCHook -Action $CodeHook -CodeHook
 PS C:\>$Session | Start-UCEmulatorSession -StartAddress $Address -EndAddress ($Address + $X86Code.Length)
-PS C:\>$Session | Get-UCRegister -RegisterX86 ECX
-PS C:\>$Session | Get-UCRegister -RegisterX86 EDX
 PS C:\>$Session | Remove-UCEmulatorSession
 
 Description
 -----------
-This will register and in theory, register a code hook. In practice, upon execution of the code hook, the scriptblock does not execute, throws the following error "There is no Runspace available to run scripts in this thread. You can provide one in the DefaultRunspace property of the System.Management.Automation.Runspaces.Runspace type. The script block you attempted to invoke was ...", and crashes PowerShell.
+This will register and in theory, register a code hook. In practice, upon execution of the code hook, the scriptblock does not execute, access violates and crashed PowerShell.
 
 .INPUTS
 
 PSObject
 
-You can pipe a Unicorn Engine session object returned from New-UCEmulatorSession to Start-UCEmulatorSession.
+You can pipe a Unicorn Engine session handle returned from New-UCEmulatorSession to Start-UCEmulatorSession.
 
 .OUTPUTS
 
 System.IntPtr
 
-Outputs an IntPtr representing the registered hook handle.
+Outputs an IntPtr representing the registered hook handle. A hook may be unregister using the Remove-UCHook function.
 #>
 
-    [CmdletBinding()]
     [OutputType([IntPtr])]
     param (
         [Parameter(Mandatory = $True, ValueFromPipeline = $True)]
-        [PSObject]
-        [ValidateScript({ $_.PSObject.TypeNames[0] -eq 'UnicornEngine.EngineSession' })]
+        [IntPtr]
+        [ValidateScript({ $_ -and ($_ -ne [IntPtr]::Zero) })]
         $Session,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'CodeHook')]
+        [Switch]
+        $CodeHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'InterruptHook')]
+        [Switch]
+        $InterruptHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'BlockHook')]
+        [Switch]
+        $BasicBlockHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'ReadMemHook')]
+        [Switch]
+        $MemoryReadHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'WriteMemHook')]
+        [Switch]
+        $MemoryWriteHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'InvalidMemHook')]
+        [Switch]
+        $InvalidMemAccessHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'SyscallHook')]
+        [Switch]
+        $SyscallHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'InHook')]
+        [Switch]
+        $X86InHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'OutHook')]
+        [Switch]
+        $X86OutHook,
+
+        [Parameter(ParameterSetName = 'CodeHook')]
+        [Parameter(ParameterSetName = 'BlockHook')]
+        [Parameter(ParameterSetName = 'ReadMemHook')]
+        [Parameter(ParameterSetName = 'WriteMemHook')]
+        [UInt64]
+        $BeginAddress = 1,
+
+        [Parameter(ParameterSetName = 'CodeHook')]
+        [Parameter(ParameterSetName = 'BlockHook')]
+        [Parameter(ParameterSetName = 'ReadMemHook')]
+        [Parameter(ParameterSetName = 'WriteMemHook')]
+        [UInt64]
+        $EndAddress = 0,
 
         [Parameter(Mandatory = $True)]
         [ScriptBlock]
+        [ValidateNotNullOrEmpty()]
         $Action
     )
 
-    Assert-UCValidEmulatorSession -Session $Session -Context $MyInvocation
-
     $HookHandle = [IntPtr]::Zero
 
-    $Delegate = Get-DelegateType -Parameters @([IntPtr], [UInt64], [UInt32], [IntPtr]) -ReturnType ([Int]) #-CallingConvention Cdecl
+    switch ($PSCmdlet.ParameterSetName) {
+        'CodeHook' {
+            $Callback = New-UCHookCallback -Action $Action -CodeHook
 
-    $Callback = $Action -as $Delegate
+            $Status = [UnicornEngine.NativeMethods.unicorn]::uc_hook_add_arg0_arg1($Session,
+                                                                                   [Ref] $HookHandle,
+                                                                                   [UnicornEngine.Const.uc_hook_type]::CODE,
+                                                                                   $Callback,
+                                                                                   [IntPtr]::Zero,
+                                                                                   $BeginAddress,
+                                                                                   $EndAddress)
+        }
 
-    $ScriptBlockPtr = [Delegate].GetField('_methodPtr', [Reflection.BindingFlags] 'NonPublic, Instance').GetValue($Callback).ToString('X16')
-    Write-Verbose "Scriptblock unmanaged addr: 0x$ScriptBlockPtr"
+        'BlockHook' {
+            $Callback = New-UCHookCallback -Action $Action -BasicBlockHook
 
-    # For the purposes of debugging, you should validate that the address at $ScriptBlockPtr and $Callback are executed
+            $Status = [UnicornEngine.NativeMethods.unicorn]::uc_hook_add_arg0_arg1($Session,
+                                                                                   [Ref] $HookHandle,
+                                                                                   [UnicornEngine.Const.uc_hook_type]::BLOCK,
+                                                                                   $Callback,
+                                                                                   [IntPtr]::Zero,
+                                                                                   $BeginAddress,
+                                                                                   $EndAddress)
+        }
 
-    # Todo: If this ever works, I would like to add a -Context parameter that would be passed to the scriptblock.
+        'ReadMemHook' {
+            $Callback = New-UCHookCallback -Action $Action -MemoryReadHook
 
-    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_hook_add($Session.EngineHandle, [Ref] $HookHandle, [UnicornEngine.Const.uc_hook_type]::CODE, $Callback, [IntPtr]::Zero, 1, 0)
+            $Status = [UnicornEngine.NativeMethods.unicorn]::uc_hook_add_arg0_arg1($Session,
+                                                                                   [Ref] $HookHandle,
+                                                                                   [UnicornEngine.Const.uc_hook_type]::MEM_READ,
+                                                                                   $Callback,
+                                                                                   [IntPtr]::Zero,
+                                                                                   $BeginAddress,
+                                                                                   $EndAddress)
+        }
+
+        'WriteMemHook' {
+            $Callback = New-UCHookCallback -Action $Action -MemoryWriteHook
+
+            $Status = [UnicornEngine.NativeMethods.unicorn]::uc_hook_add_arg0_arg1($Session,
+                                                                                   [Ref] $HookHandle,
+                                                                                   [UnicornEngine.Const.uc_hook_type]::MEM_WRITE,
+                                                                                   $Callback,
+                                                                                   [IntPtr]::Zero,
+                                                                                   $BeginAddress,
+                                                                                   $EndAddress)
+        }
+
+        'InterruptHook' {
+            $Callback = New-UCHookCallback -Action $Action -InterruptHook
+
+            $Status = [UnicornEngine.NativeMethods.unicorn]::uc_hook_add_noargs($Session,
+                                                                                [Ref] $HookHandle,
+                                                                                [UnicornEngine.Const.uc_hook_type]::INTR,
+                                                                                $Callback,
+                                                                                [IntPtr]::Zero)
+        }
+
+        'InvalidMemHook' {
+            $Callback = New-UCHookCallback -Action $Action -InvalidMemAccessHook
+
+            # MEM_INVALID will be a catch-all until someone requests more granular invalid mem hook types
+            $Status = [UnicornEngine.NativeMethods.unicorn]::uc_hook_add_noargs($Session,
+                                                                                [Ref] $HookHandle,
+                                                                                [UnicornEngine.Const.uc_hook_type]::MEM_INVALID,
+                                                                                $Callback,
+                                                                                [IntPtr]::Zero)
+        }
+
+        'InHook' {
+            $Callback = New-UCHookCallback -Action $Action -X86InHook
+
+            $Status = [UnicornEngine.NativeMethods.unicorn]::uc_hook_add_arg0($Session,
+                                                                              [Ref] $HookHandle,
+                                                                              [UnicornEngine.Const.uc_hook_type]::INSN,
+                                                                              $Callback,
+                                                                              [IntPtr]::Zero,
+                                                                              [UnicornEngine.Const.Ins.X86]::IN)
+        }
+
+        'OutHook' {
+            $Callback = New-UCHookCallback -Action $Action -X86OutHook
+
+            $Status = [UnicornEngine.NativeMethods.unicorn]::uc_hook_add_arg0($Session,
+                                                                              [Ref] $HookHandle,
+                                                                              [UnicornEngine.Const.uc_hook_type]::INSN,
+                                                                              $Callback,
+                                                                              [IntPtr]::Zero,
+                                                                              [UnicornEngine.Const.Ins.X86]::OUT)
+        }
+
+        'SyscallHook' {
+            $Callback = New-UCHookCallback -Action $Action -SyscallHook
+
+            $Status = [UnicornEngine.NativeMethods.unicorn]::uc_hook_add_arg0($Session,
+                                                                              [Ref] $HookHandle,
+                                                                              [UnicornEngine.Const.uc_hook_type]::INSN,
+                                                                              $Callback,
+                                                                              [IntPtr]::Zero,
+                                                                              [UnicornEngine.Const.Ins.X86]::SYSCALL)
+        }
+    }
 
     Assert-UCError -ErrorCode $Status -Context $MyInvocation
 
     return $HookHandle
+}
+
+function Remove-UCHook {
+<#
+.SYNOPSIS
+
+Removes a previously registered hook callback.
+
+.DESCRIPTION
+
+Remove-UCHook removes a previously registered hook callback that was registered with Register-UCHook.
+
+.PARAMETER Session
+
+The Unicorn Engine emulator handle returned from New-UCEmulatorSession.
+
+.PARAMETER HookHandle
+
+Specifies the hook handle returned from Register-UCHook.
+
+.EXAMPLE
+
+PS C:\>$X86Code = @(0x41) # INC ecx
+PS C:\>$Address = 0x1000000
+PS C:\>$Session = New-UCEmulatorSession -X86 -X86Mode MODE_32
+PS C:\>$Session | Initialize-UCMemoryMap -Address $Address -Size 2048KB
+PS C:\>$Session | Write-UCMemory -Address $Address -Data $X86Code
+PS C:\>$Session | Start-UCEmulatorSession -StartAddress $Address -EndAddress ($Address + $X86Code.Length)
+PS C:\>$HookHandle = $Session | Register-UCHook -CodeHook -Action { Write-Host 'Hook executed' }
+PS C:\>$Session | Remove-UCHook -HookHandle $HookHandle
+
+.INPUTS
+
+PSObject
+
+You can pipe a Unicorn Engine session handle returned from New-UCEmulatorSession to Read-UCMemory.
+
+.OUTPUTS
+
+None
+
+.NOTES
+
+Remove-UCHook zeroes out the argument passed in via -HookHandle. This is to help ensure that a previous hook handle is not reused.
+#>
+
+    param (
+        [Parameter(Mandatory = $True, ValueFromPipeline = $True)]
+        [IntPtr]
+        [ValidateScript({ $_ -and ($_ -ne [IntPtr]::Zero) })]
+        $Session,
+
+        [Parameter(Mandatory = $True)]
+        [IntPtr]
+        [ValidateScript({ $_ -and ($_ -ne [IntPtr]::Zero) })]
+        $HookHandle
+    )
+
+    $Status = [UnicornEngine.NativeMethods.unicorn]::uc_hook_del($Session, $HookHandle)
+
+    # Yes, I know I'm violating the rules of scope by doing this but it is
+    # imperitive that the argument passed in the parent scope be set to zero.
+    [IntPtr].GetField('m_value', [Reflection.BindingFlags] 'NonPublic, Instance').SetValue($HookHandle, [IntPtr]::Zero)
+
+    Assert-UCError -ErrorCode $Status -Context $MyInvocation
+}
+
+function New-UCHookTemplate {
+<#
+.SYNOPSIS
+
+Outputs a scriptblock hook template for use with Register-UCHook.
+
+.DESCRIPTION
+
+New-UCHookTemplate should be used to output a scriptblock template for use with Register-UCHook. The scriptblock returned will contain named parameters matching the function signature of the corresponding hook. Because it may not be obvious to users how to properly interact with the Unicorn callback functions, New-UCHookTemplate will provide an intuitive template to work with.
+
+.PARAMETER CodeHook
+
+Specifies a code hook template.
+
+.PARAMETER InterruptHook
+
+Specifies an interrupt hook template.
+
+.PARAMETER BasicBlockHook
+
+Specifies a basic block template.
+
+.PARAMETER MemoryReadHook
+
+Specifies a memory read hook template.
+
+.PARAMETER MemoryWriteHook
+
+Specifies a memory write hook template.
+
+.PARAMETER InvalidMemAccessHook
+
+Specifies an invalid memory access hook template.
+
+.PARAMETER SyscallHook
+
+Specifies a syscall hook template.
+
+.PARAMETER X86InHook
+
+Specifies an x86 IN hook template.
+
+.PARAMETER X86OutHook
+
+Specifies an x86 OUT hook template.
+
+.EXAMPLE
+
+$CodeHookTemplate = New-UCHookTemplate -CodeHook
+
+.INPUTS
+
+None
+
+.OUTPUTS
+
+ScriptBlock
+
+Outputs a scriptblock that corresponds to its respective Unicorn callback function.
+#>
+
+    [OutputType([ScriptBlock])]
+    param (
+        [Parameter(Mandatory = $True, ParameterSetName = 'CodeHook')]
+        [Switch]
+        $CodeHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'InterruptHook')]
+        [Switch]
+        $InterruptHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'BlockHook')]
+        [Switch]
+        $BasicBlockHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'ReadMemHook')]
+        [Switch]
+        $MemoryReadHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'WriteMemHook')]
+        [Switch]
+        $MemoryWriteHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'InvalidMemHook')]
+        [Switch]
+        $InvalidMemAccessHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'SyscallHook')]
+        [Switch]
+        $SyscallHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'InHook')]
+        [Switch]
+        $X86InHook,
+
+        [Parameter(Mandatory = $True, ParameterSetName = 'OutHook')]
+        [Switch]
+        $X86OutHook
+    )
+
+    $ScriptblockTemplate = {}
+
+    switch ($PSCmdlet.ParameterSetName) {
+        'CodeHook' {
+            $ScriptblockTemplate = {
+param (
+    [IntPtr]
+    $Session,
+
+    [UInt64]
+    $Address,
+
+    [UInt32]
+    $Size
+)
+
+
+}
+        }
+
+        'BlockHook' {
+            $ScriptblockTemplate = {
+param (
+    [IntPtr]
+    $Session,
+
+    [UInt64]
+    $Address,
+
+    [UInt32]
+    $Size
+)
+
+
+}
+        }
+
+        'InterruptHook' {
+            $ScriptblockTemplate = {
+param (
+    [IntPtr]
+    $Session,
+
+    [UInt32]
+    $InterruptNumber
+)
+
+
+}
+        }
+
+        'ReadMemHook' {
+            $ScriptblockTemplate = {
+param (
+    [IntPtr]
+    $Session,
+
+    [UnicornEngine.Const.uc_mem]
+    $Type,
+
+    [UInt64]
+    $Address,
+
+    [UInt32]
+    $Size,
+
+    [Int64]
+    $Value
+)
+
+
+}
+        }
+
+        'WriteMemHook' {
+            $ScriptblockTemplate = {
+param (
+    [IntPtr]
+    $Session,
+
+    [UnicornEngine.Const.uc_mem]
+    $Type,
+
+    [UInt64]
+    $Address,
+
+    [UInt32]
+    $Size,
+
+    [Int64]
+    $Value
+)
+
+
+}
+        }
+
+        'InvalidMemHook' {
+            $ScriptblockTemplate = {
+param (
+    [IntPtr]
+    $Session,
+
+    [UnicornEngine.Const.uc_mem]
+    $Type,
+
+    [UInt64]
+    $Address,
+
+    [UInt32]
+    $Size,
+
+    [Int64]
+    $Value
+)
+
+
+}
+        }
+
+        'InHook' {
+            $ScriptblockTemplate = {
+param (
+    [IntPtr]
+    $Session,
+
+    [UInt32]
+    $Port,
+
+    [UInt32]
+    $Size
+)
+
+
+}
+        }
+
+        'OutHook' {
+            $ScriptblockTemplate = {
+param (
+    [IntPtr]
+    $Session,
+
+    [UInt32]
+    $Port,
+
+    [UInt32]
+    $Size,
+
+    [UInt32]
+    $Value
+)
+
+
+}
+        }
+
+        'SyscallHook' {
+            $ScriptblockTemplate = {
+param (
+    [IntPtr]
+    $Session
+)
+
+
+}
+        }
+    }
+
+    return $ScriptblockTemplate
 }
 #endregion
